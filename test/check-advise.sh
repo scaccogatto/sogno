@@ -38,12 +38,19 @@ assert_eq "14:00" "$(window_end "09:00")" "window_end(09:00) = 14:00 (octal trap
 
 echo ""
 echo "Testing UTC->local conversion (real utc_to_local_hm, pinned TZ=Europe/Rome)..."
-# date -j -f "%s" 1756900000 "+%H:%M" under TZ=Europe/Rome is deterministically 13:46
-# (date -j -u -f ... would wrongly print 11:46 -- that was the D1 bug).
-hm=$(TZ=Europe/Rome utc_to_local_hm 1756900000)
-assert_eq "13:46" "$hm" "utc_to_local_hm(1756900000) under TZ=Europe/Rome = 13:46"
-hour=$(TZ=Europe/Rome utc_to_local_hour 1756900000)
-assert_eq "13" "$hour" "utc_to_local_hour(1756900000) under TZ=Europe/Rome = 13"
+# Git Bash ships without the zoneinfo database, so a TZ override silently falls
+# back to UTC there. Real runs are unaffected (MSYS takes the Windows zone when
+# TZ is unset), but these two asserts cannot be pinned, so they are skipped.
+if [ "$(TZ=Europe/Rome utc_to_local_hour 1756900000)" = "$(TZ=UTC utc_to_local_hour 1756900000)" ]; then
+  echo "  SKIP no zoneinfo database: TZ overrides are ignored on this host"
+else
+  # date -j -f "%s" 1756900000 "+%H:%M" under TZ=Europe/Rome is deterministically 13:46
+  # (date -j -u -f ... would wrongly print 11:46 -- that was the D1 bug).
+  hm=$(TZ=Europe/Rome utc_to_local_hm 1756900000)
+  assert_eq "13:46" "$hm" "utc_to_local_hm(1756900000) under TZ=Europe/Rome = 13:46"
+  hour=$(TZ=Europe/Rome utc_to_local_hour 1756900000)
+  assert_eq "13" "$hour" "utc_to_local_hour(1756900000) under TZ=Europe/Rome = 13"
+fi
 
 echo ""
 echo "Testing flattened-path -> repo-name mapping (real flattened_to_repo)..."
