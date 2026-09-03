@@ -13,7 +13,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Ship a bundle that runs as-is: sogno resolves prompts/ and the scheduler
+      # templates relative to itself, so they have to travel with it.
+      - name: Build bundle
+        run: |
+          name="sogno-${GITHUB_REF_NAME#v}"
+          mkdir -p "dist/$name"
+          cp -R sogno prompts launchd systemd windows sogno.conf.example README.md LICENSE Makefile "dist/$name/"
+          cd dist
+          tar czf "$name.tar.gz" "$name"
+          zip -qr "$name.zip" "$name"
+          sha256sum "$name.tar.gz" "$name.zip" > SHA256SUMS
+
       - name: Create release
-        run: gh release view "$GITHUB_REF_NAME" || gh release create "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          gh release view "$GITHUB_REF_NAME" \
+            || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS
         env:
           GH_TOKEN: ${{ github.token }}

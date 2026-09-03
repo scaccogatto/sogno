@@ -39,6 +39,8 @@ cp sogno.conf.example sogno.conf   # edit ANCHOR_TIME, PROJECTS_ROOT, DREAM_TIME
 ./sogno install
 ```
 
+Or download `sogno-<version>.tar.gz` (or `.zip`) from the [latest release](https://github.com/scaccogatto/sogno/releases/latest) and unpack it anywhere: it carries the prompts and the scheduler templates sogno needs at runtime.
+
 On macOS the first nightly run may ask once for notification permission.
 
 ## Configuration
