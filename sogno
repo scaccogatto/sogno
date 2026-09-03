@@ -522,6 +522,11 @@ cmd_dream() {
     return 0
   fi
 
+  # A dry-run must not consume the daily stamp: statuses go to a throwaway file
+  if [ "$dry_run" -eq 1 ]; then
+    stamp_file=$(mktemp "${TMPDIR:-/tmp}/sogno-stamp.XXXXXX")
+  fi
+
   echo "run=$(date +%H:%M)" >> "$stamp_file"
 
   log "dream: starting orchestrator"
