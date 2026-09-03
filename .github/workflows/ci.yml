@@ -7,18 +7,23 @@ on:
 
 jobs:
   test:
-    runs-on: macos-15
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install shellcheck
-        run: command -v shellcheck || brew install shellcheck
 
       - name: Syntax check
         run: bash -n sogno
 
       - name: Shellcheck
+        if: matrix.os == 'ubuntu-latest'
         run: shellcheck -S warning sogno test/check-advise.sh
 
+      # bash, not sh: the test sources sogno, whose arrays dash cannot parse.
       - name: Test
-        run: sh test/check-advise.sh
+        run: bash test/check-advise.sh

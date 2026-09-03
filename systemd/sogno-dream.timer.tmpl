@@ -1,0 +1,9 @@
+[Unit]
+Description=sogno dream timer
+
+[Timer]
+OnCalendar=*-*-* @HOUR@:@MINUTE@:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

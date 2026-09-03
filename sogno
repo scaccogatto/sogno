@@ -1,12 +1,38 @@
 #!/bin/bash
 # sogno — nightly dream orchestrator + warmup anchor
 # Consolidates memory, generates briefing, proposes CLAUDE.md changes, and tackles backlog.
-# macOS bash 3.2 compatible: no associative arrays, no ${var,,}.
+# bash 3.2 compatible: no associative arrays, no ${var,,}. Runs on macOS, Linux and Windows (Git Bash).
 set -eu
 
 # Setup
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# systemd user services and Task Scheduler start with a minimal PATH, so the
+# usual install locations for claude/gh have to be added back explicitly.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"
 SELF="$(cd "$(dirname "$0")" && pwd)"
+
+# OS detection: macos | linux | windows. WSL reports Linux and is intentionally treated as linux.
+# Override with env var SOGNO_OS for testing.
+if [ -z "${SOGNO_OS:-}" ]; then
+  case "$(uname -s)" in
+    Darwin) SOGNO_OS=macos ;;
+    Linux) SOGNO_OS=linux ;;
+    MINGW*|MSYS*|CYGWIN*) SOGNO_OS=windows ;;
+    *)
+      SOGNO_OS=linux
+      echo "sogno: unrecognized OS '$(uname -s)', assuming linux" >&2
+      ;;
+  esac
+fi
+
+# Date flavor probe: bsd (date -j) or gnu (date -d). Override with env var SOGNO_DATE for testing.
+if [ -z "${SOGNO_DATE:-}" ]; then
+  if date -j -f "%s" 0 "+%s" >/dev/null 2>&1; then
+    SOGNO_DATE=bsd
+  else
+    SOGNO_DATE=gnu
+  fi
+fi
+
 TODAY="$(date +%F)"
 
 # Defaults (will be overridden by config)
@@ -31,9 +57,23 @@ for conf in "$SELF/sogno.conf" "./sogno.conf"; do
   fi
 done
 
-# Derive transcript filter prefix from PROJECTS_ROOT
-# Claude Code flattens paths as: -Users-gatto-Developer-x
-PROJECTS_PREFIX="-$(echo "$PROJECTS_ROOT" | sed 's|^/||; s|/|-|g')-"
+# Derive transcript filter prefix from a project root path.
+# Claude Code flattens paths as: -Users-gatto-Developer-x (POSIX) or C--Users-x-dev- (Windows).
+derive_projects_prefix() {
+  local path="$1" win_root
+  if [ "$SOGNO_OS" = windows ] && command -v cygpath >/dev/null 2>&1; then
+    win_root=$(cygpath -w "$path")
+  else
+    win_root="$path"
+  fi
+  printf '%s-' "$(printf '%s' "$win_root" | sed 's|[/\\:]|-|g')"
+}
+
+# PROJECTS_PREFIX can be set explicitly in sogno.conf (escape hatch when
+# auto-detection fails, e.g. unverified Windows drive-letter handling).
+if [ -z "${PROJECTS_PREFIX:-}" ]; then
+  PROJECTS_PREFIX="$(derive_projects_prefix "$PROJECTS_ROOT")"
+fi
 
 # Lock cleanup target, set by cmd_dream once the lock is actually held.
 _sogno_lock_dir=""
@@ -66,12 +106,59 @@ claude_guard() {
 # so we must NOT pass -u here or the OUTPUT gets formatted as UTC instead of local.
 utc_to_local_hm() {
   local utc_sec="$1"
-  date -j -f "%s" "$utc_sec" "+%H:%M"
+  if [ "$SOGNO_DATE" = bsd ]; then
+    date -j -f "%s" "$utc_sec" "+%H:%M"
+  else
+    date -d "@$utc_sec" "+%H:%M"
+  fi
 }
 
 utc_to_local_hour() {
   local utc_sec="$1"
-  date -j -f "%s" "$utc_sec" "+%H"
+  if [ "$SOGNO_DATE" = bsd ]; then
+    date -j -f "%s" "$utc_sec" "+%H"
+  else
+    date -d "@$utc_sec" "+%H"
+  fi
+}
+
+# Epoch seconds -> local date (%Y-%m-%d).
+epoch_to_local_date() {
+  local utc_sec="$1"
+  if [ "$SOGNO_DATE" = bsd ]; then
+    date -j -f "%s" "$utc_sec" "+%Y-%m-%d"
+  else
+    date -d "@$utc_sec" "+%Y-%m-%d"
+  fi
+}
+
+# ISO-8601 UTC timestamp without fractional seconds (e.g. 2025-09-03T11:46:40) -> epoch seconds.
+iso_utc_to_epoch() {
+  local ts_no_ms="$1"
+  if [ "$SOGNO_DATE" = bsd ]; then
+    date -j -u -f "%Y-%m-%dT%H:%M:%S" "$ts_no_ms" "+%s"
+  else
+    date -u -d "${ts_no_ms}Z" "+%s"
+  fi
+}
+
+# Yesterday's local date (%F).
+yesterday_date() {
+  if [ "$SOGNO_DATE" = bsd ]; then
+    date -j -v-1d "+%F"
+  else
+    date -d "yesterday" "+%F"
+  fi
+}
+
+# mtime of a path in epoch seconds; 0 if unavailable.
+file_mtime() {
+  local path="$1"
+  if [ "$SOGNO_DATE" = bsd ]; then
+    stat -f %m "$path" 2>/dev/null || echo 0
+  else
+    stat -c %Y "$path" 2>/dev/null || echo 0
+  fi
 }
 
 # Calculate end time of a 5-hour window given start time HH:MM
@@ -153,10 +240,21 @@ flattened_to_repo() {
 # Prints "repo<TAB>path" lines, one per transcript, skipping PROJECTS_EXCLUDE repos.
 # Shared by phase 1 (briefing), phase 2 (proposals) and phase 3 (backlog).
 discover_yesterday_grouped() {
-  local yesterday tf flat repo ex excluded
-  yesterday=$(date -j -v-1d "+%F")
-  find "$HOME/.claude/projects/" -path "*/${PROJECTS_PREFIX}*" -name "*.jsonl" \
-    -newermt "$yesterday 00:00" ! -newermt "$TODAY 00:00" 2>/dev/null | sort | while IFS= read -r tf; do
+  local yesterday tf flat repo ex excluded files
+  yesterday=$(yesterday_date)
+  files=$(find "$HOME/.claude/projects/" -path "*/${PROJECTS_PREFIX}*" -name "*.jsonl" \
+    -newermt "$yesterday 00:00" ! -newermt "$TODAY 00:00" 2>/dev/null | sort)
+
+  if [ -z "$files" ]; then
+    # A quiet day is normal; only a prefix that matches no project dir at all
+    # points at a broken derivation.
+    if [ -z "$(find "$HOME/.claude/projects/" -maxdepth 1 -type d -name "${PROJECTS_PREFIX}*" 2>/dev/null)" ]; then
+      echo "sogno: no project dir matches prefix '$PROJECTS_PREFIX' (set PROJECTS_PREFIX in sogno.conf to override)" >&2
+    fi
+    return 0
+  fi
+
+  printf '%s\n' "$files" | while IFS= read -r tf; do
     flat=$(basename "$(dirname "$tf")")
     repo=$(flattened_to_repo "$flat")
     excluded=0
@@ -196,7 +294,7 @@ Commands:
   advise          Analyze usage patterns and recommend anchor time
   warmup          Warm up Claude session (cheap model)
   dream           Run full orchestrator (consolidate → briefing → proposals → backlog)
-  install         Install/update launchd jobs and create DREAM_DIR
+  install         Install/update scheduler jobs (launchd / systemd / Task Scheduler) and create DREAM_DIR
   status          Show job status, last runs, config drift
   help            Show this message
 
@@ -245,13 +343,18 @@ cmd_advise() {
 
   local cutoff_sec cutoff_date
   cutoff_sec=$(( $(date +%s) - days * 86400 ))
-  cutoff_date=$(date -j -f "%s" "$cutoff_sec" "+%Y-%m-%d")
+  cutoff_date=$(epoch_to_local_date "$cutoff_sec")
 
   echo "Analyzing project activity from $cutoff_date to $TODAY..."
   echo ""
 
   local jsonl_files
   jsonl_files=$(find "$HOME/.claude/projects/" -path "*/${PROJECTS_PREFIX}*" -name "*.jsonl" -newermt "$cutoff_date" 2>/dev/null)
+
+  if [ -z "$jsonl_files" ] &&
+     [ -z "$(find "$HOME/.claude/projects/" -maxdepth 1 -type d -name "${PROJECTS_PREFIX}*" 2>/dev/null)" ]; then
+    echo "  no project dir matches prefix '$PROJECTS_PREFIX' (set PROJECTS_PREFIX in sogno.conf to override)" >&2
+  fi
 
   local tmp_first
   tmp_first=$(mktemp)
@@ -266,9 +369,9 @@ cmd_advise() {
       ts=$(printf '%s' "$ts_line" | grep -o '"timestamp":"[^"]*"' | head -1 | sed 's/"timestamp":"//; s/"$//')
       [ -n "$ts" ] || continue
       ts_no_ms="${ts%.*}"
-      epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$ts_no_ms" "+%s" 2>/dev/null) || continue
+      epoch=$(iso_utc_to_epoch "$ts_no_ms" 2>/dev/null) || continue
       local_hm=$(utc_to_local_hm "$epoch")
-      local_date=$(date -j -f "%s" "$epoch" "+%Y-%m-%d")
+      local_date=$(epoch_to_local_date "$epoch")
       echo "$local_date $local_hm" >> "$tmp_first"
     done <<< "$jsonl_files"
   fi
@@ -359,6 +462,32 @@ cmd_advise() {
 
 cmd_install() {
   mkdir -p "$DREAM_DIR"
+  case "$SOGNO_OS" in
+    macos) install_macos ;;
+    linux) install_linux ;;
+    windows) install_windows ;;
+    *) echo "install: unsupported OS '$SOGNO_OS'" >&2; exit 1 ;;
+  esac
+}
+
+# Render one @SELF@/@DREAMDIR@/@HOUR@/@MINUTE@ template, idempotent via cmp -s.
+# Returns 0 if the rendered file changed, 1 if unchanged.
+render_template() {
+  local tmpl="$1" out="$2" hour="$3" minute="$4"
+  sed -e "s|@SELF@|$SELF|g" -e "s|@DREAMDIR@|$DREAM_DIR|g" \
+      -e "s|@BASH@|${SOGNO_BASH:-bash.exe}|g" \
+      -e "s/@HOUR@/$hour/g" -e "s/@MINUTE@/$minute/g" \
+    "$tmpl" > "$out.new"
+  if cmp -s "$out.new" "$out" 2>/dev/null; then
+    rm "$out.new"
+    return 1
+  else
+    mv "$out.new" "$out"
+    return 0
+  fi
+}
+
+install_macos() {
   mkdir -p "$HOME/Library/LaunchAgents"
 
   log "install: rendering plist templates"
@@ -406,6 +535,106 @@ cmd_install() {
 
   log "install complete"
   echo "Installation complete. Check status with: sogno status"
+}
+
+install_linux() {
+  local unit_dir="$HOME/.config/systemd/user"
+  mkdir -p "$unit_dir"
+
+  log "install: rendering systemd unit templates"
+
+  local anchor_h="${ANCHOR_TIME%:*}"
+  local anchor_m="${ANCHOR_TIME#*:}"
+  local dream_h="${DREAM_TIME%:*}"
+  local dream_m="${DREAM_TIME#*:}"
+
+  local changed=0
+  render_template "$SELF/systemd/sogno-warmup.service.tmpl" "$unit_dir/sogno-warmup.service" "$anchor_h" "$anchor_m" && changed=1
+  render_template "$SELF/systemd/sogno-warmup.timer.tmpl" "$unit_dir/sogno-warmup.timer" "$anchor_h" "$anchor_m" && changed=1
+  render_template "$SELF/systemd/sogno-dream.service.tmpl" "$unit_dir/sogno-dream.service" "$dream_h" "$dream_m" && changed=1
+  render_template "$SELF/systemd/sogno-dream.timer.tmpl" "$unit_dir/sogno-dream.timer" "$dream_h" "$dream_m" && changed=1
+
+  # list-units, not --version: --version succeeds without a user manager, so it
+  # would miss WSL and other sessions where systemd --user is not running.
+  if ! systemctl --user list-units >/dev/null 2>&1; then
+    log "install: systemctl --user unavailable, printing crontab lines instead"
+    echo "systemctl --user is not available. Add these lines to your crontab (crontab -e):"
+    echo "  $anchor_m $anchor_h * * * $SELF/sogno warmup"
+    echo "  $dream_m $dream_h * * * $SELF/sogno dream"
+    return 0
+  fi
+
+  if [ "$changed" -eq 1 ]; then
+    systemctl --user daemon-reload
+    systemctl --user enable --now sogno-warmup.timer
+    systemctl --user enable --now sogno-dream.timer
+    log "install: systemd units reloaded and enabled"
+  else
+    log "install: systemd units unchanged"
+  fi
+
+  echo "Installation complete. Check status with: sogno status"
+  echo "Run 'loginctl enable-linger $USER' so jobs fire while logged out."
+  log "install complete"
+}
+
+install_windows() {
+  log "install: rendering Task Scheduler XML templates"
+
+  # Task Scheduler does not inherit the Git Bash PATH, so the action needs the
+  # absolute Windows path to bash.exe.
+  SOGNO_BASH="$(command -v bash)"
+  if command -v cygpath >/dev/null 2>&1; then
+    # Backslashes are escape characters in a sed replacement, so double them.
+    SOGNO_BASH="$(cygpath -w "$SOGNO_BASH" | sed 's|\\|\\\\|g')"
+  fi
+
+  local anchor_h="${ANCHOR_TIME%:*}"
+  local anchor_m="${ANCHOR_TIME#*:}"
+  local dream_h="${DREAM_TIME%:*}"
+  local dream_m="${DREAM_TIME#*:}"
+
+  install_windows_task "sogno-warmup" "$SELF/windows/sogno-warmup.xml.tmpl" "$anchor_h" "$anchor_m"
+  install_windows_task "sogno-dream" "$SELF/windows/sogno-dream.xml.tmpl" "$dream_h" "$dream_m"
+
+  echo "Installation complete. Check status with: sogno status"
+  log "install complete"
+}
+
+# Render + register one Task Scheduler XML. Failures are reported but don't
+# abort the other job, mirroring install_macos's per-job || { ... } shape.
+install_windows_task() {
+  local name="$1" tmpl="$2" hour="$3" minute="$4"
+  local xml_path="$DREAM_DIR/$name.xml" win_path
+
+  render_template "$tmpl" "$xml_path" "$hour" "$minute" || true
+
+  if command -v cygpath >/dev/null 2>&1; then
+    win_path=$(cygpath -w "$xml_path")
+  else
+    win_path="$xml_path"
+  fi
+
+  if schtasks.exe /Create /TN "$name" /XML "$win_path" /F >>"$DREAM_DIR/$TODAY.log" 2>&1; then
+    return 0
+  fi
+
+  # Some Task Scheduler builds only accept UTF-16 XML. The templates carry no
+  # encoding declaration, so the same bytes re-encoded are still valid.
+  if command -v iconv >/dev/null 2>&1 &&
+     iconv -f UTF-8 -t UTF-16LE "$xml_path" > "$xml_path.u16" 2>/dev/null; then
+    printf '\xff\xfe' | cat - "$xml_path.u16" > "$xml_path.bom" && mv "$xml_path.bom" "$xml_path.u16"
+    if command -v cygpath >/dev/null 2>&1; then
+      win_path=$(cygpath -w "$xml_path.u16")
+    else
+      win_path="$xml_path.u16"
+    fi
+    if schtasks.exe /Create /TN "$name" /XML "$win_path" /F >>"$DREAM_DIR/$TODAY.log" 2>&1; then
+      return 0
+    fi
+  fi
+
+  echo "Failed to register scheduled task $name (see $DREAM_DIR/$TODAY.log)" >&2
 }
 
 # Run one dream phase, isolating its failure from the orchestrator (set -eu safe)
@@ -470,9 +699,31 @@ notify_dream_result() {
   if [ "$dry_run" -eq 1 ]; then
     log "notify (dry-run, would display): $msg"
   else
-    osascript -e "display notification \"$msg\" with title \"sogno\" subtitle \"$TODAY\"" >/dev/null 2>&1 || true
+    notify_desktop "sogno" "$TODAY" "$msg"
     log "notify: $msg"
   fi
+}
+
+# Desktop notification, best-effort. Any failure is non-fatal.
+notify_desktop() {
+  local title="$1" subtitle="$2" msg="$3"
+  case "$SOGNO_OS" in
+    macos)
+      osascript -e "display notification \"$msg\" with title \"$title\" subtitle \"$subtitle\"" >/dev/null 2>&1 || true
+      ;;
+    linux)
+      if command -v notify-send >/dev/null 2>&1; then
+        notify-send "$title" "$subtitle: $msg" >/dev/null 2>&1 || true
+      fi
+      ;;
+    windows)
+      if command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -NoProfile -Command \
+          "[reflection.assembly]::loadwithpartialname('System.Windows.Forms') | Out-Null; [reflection.assembly]::loadwithpartialname('System.Drawing') | Out-Null; \$n = New-Object System.Windows.Forms.NotifyIcon; \$n.Icon = [System.Drawing.SystemIcons]::Information; \$n.Visible = \$true; \$n.ShowBalloonTip(5000,'$title','$subtitle: $msg',[System.Windows.Forms.ToolTipIcon]::Info)" \
+          >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
 }
 
 cmd_dream() {
@@ -508,7 +759,7 @@ cmd_dream() {
     log "dream: lock acquired"
   else
     local lock_mtime now_epoch
-    lock_mtime=$(stat -f %m "$lock_dir" 2>/dev/null || echo 0)
+    lock_mtime=$(file_mtime "$lock_dir")
     now_epoch=$(date +%s)
     if [ $((now_epoch - lock_mtime)) -gt 21600 ]; then
       log "dream: removing stale lock"
@@ -840,12 +1091,7 @@ $issue_body"
   return 0
 }
 
-cmd_status() {
-  echo "sogno status at $(date)"
-  echo ""
-
-  # Launchd jobs
-  echo "Launchd jobs:"
+status_jobs_macos() {
   for job in com.scaccogatto.sogno.warmup com.scaccogatto.sogno.dream; do
     if launchctl print "gui/$(id -u)/$job" >/dev/null 2>&1; then
       launchctl print "gui/$(id -u)/$job" | grep -E "state|last|next" | head -5 | sed 's/^/  /'
@@ -853,6 +1099,44 @@ cmd_status() {
       echo "  $job: not loaded"
     fi
   done
+}
+
+status_jobs_linux() {
+  if ! systemctl --user list-units >/dev/null 2>&1; then
+    echo "  systemctl --user not available"
+    return 0
+  fi
+  local unit
+  for unit in sogno-warmup.timer sogno-dream.timer; do
+    if systemctl --user is-enabled "$unit" >/dev/null 2>&1; then
+      systemctl --user status "$unit" --no-pager 2>/dev/null | head -5 | sed 's/^/  /'
+    else
+      echo "  $unit: not loaded"
+    fi
+  done
+}
+
+status_jobs_windows() {
+  local task
+  for task in sogno-warmup sogno-dream; do
+    if schtasks.exe /Query /TN "$task" >/dev/null 2>&1; then
+      schtasks.exe /Query /TN "$task" /FO LIST | head -5 | sed 's/^/  /'
+    else
+      echo "  $task: not loaded"
+    fi
+  done
+}
+
+cmd_status() {
+  echo "sogno status at $(date)"
+  echo ""
+
+  # Scheduler jobs
+  case "$SOGNO_OS" in
+    macos) echo "Launchd jobs:"; status_jobs_macos ;;
+    linux) echo "Systemd jobs:"; status_jobs_linux ;;
+    windows) echo "Task Scheduler jobs:"; status_jobs_windows ;;
+  esac
 
   echo ""
   echo "Config:"
@@ -863,7 +1147,7 @@ cmd_status() {
   echo ""
   echo "Last dream phase status:"
   local yesterday stamp_file
-  yesterday=$(date -j -v-1d "+%F")
+  yesterday=$(yesterday_date)
   if [ -f "$DREAM_DIR/ran-$TODAY" ]; then
     stamp_file="$DREAM_DIR/ran-$TODAY"
   elif [ -f "$DREAM_DIR/ran-$yesterday" ]; then

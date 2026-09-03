@@ -13,7 +13,7 @@
 
 ---
 
-Claude Code's 5-hour usage window anchors to your first message of the day: start at 8:30, hit the limit at 11, and you sit idle until 13:30. Meanwhile your agent's memory accumulates duplicates, stale facts, and "yesterday we decided" notes that mean nothing a week later, and the hours before your workday go unused. sogno fixes all three locally: a 1-token warmup fires before you wake and pins the window resets where you want them, and a nightly orchestrator reads yesterday's session transcripts and turns them into a morning briefing, consolidation and doc proposals, and one backlog issue implemented as a draft PR. No cloud, no daemon, no dependencies: two launchd jobs and one bash script.
+Claude Code's 5-hour usage window anchors to your first message of the day: start at 8:30, hit the limit at 11, and you sit idle until 13:30. Meanwhile your agent's memory accumulates duplicates, stale facts, and "yesterday we decided" notes that mean nothing a week later, and the hours before your workday go unused. sogno fixes all three locally: a 1-token warmup fires before you wake and pins the window resets where you want them, and a nightly orchestrator reads yesterday's session transcripts and turns them into a morning briefing, consolidation and doc proposals, and one backlog issue implemented as a draft PR. No cloud, no daemon, no dependencies: two scheduler jobs and one bash script.
 
 ```sh
 sogno advise      # analyze your usage, get the best anchor time for your schedule
@@ -28,7 +28,7 @@ sogno status      # jobs, last run, per-phase outcomes
 - **Wake up already briefed.** The dream reads yesterday's transcripts across all active projects and writes one briefing: what was done, decisions, gotchas, open threads, top 3 things to look at today.
 - **Proposals, never surprises.** CLAUDE.md, memory, and OKF changes are emitted as unified diffs in patch files. You review and `git apply` in the morning; nothing is applied overnight.
 - **One issue a night, safely.** The backlog phase picks a single open issue labeled `sogno`, works in an isolated git worktree on its own branch, and opens a draft PR. Hard guards verify your default branch SHA never moved.
-- **Boring machinery.** Bash and BSD stdlib only. Atomic mkdir lock, daily stamp, wall-clock deadlines, macOS notification with the outcome. launchd replays missed fires after sleep.
+- **Boring machinery.** Bash and stdlib only, macOS/Linux/Windows alike. Atomic mkdir lock, daily stamp, wall-clock deadlines, a desktop notification with the outcome. The scheduler backend (launchd, systemd, Task Scheduler) replays missed fires after sleep.
 
 ## Quickstart
 
@@ -39,7 +39,7 @@ cp sogno.conf.example sogno.conf   # edit ANCHOR_TIME, PROJECTS_ROOT, DREAM_TIME
 ./sogno install
 ```
 
-The first nightly run may ask once for macOS notification permission.
+On macOS the first nightly run may ask once for notification permission.
 
 ## Configuration
 
@@ -56,14 +56,15 @@ The first nightly run may ask once for macOS notification permission.
 | `MODEL_MECHANICAL` | `haiku` | Model for warmup and consolidation |
 | `MODEL_SYNTHESIS` | account default | Model for briefing, proposals, backlog |
 | `DREAM_DIR` | `~/.claude/dream` | Briefings, patches, logs, lock, stamps |
+| `PROJECTS_PREFIX` | auto-detected | Escape hatch: override the Claude Code transcript prefix derived from `PROJECTS_ROOT` |
 
 ## How it works
 
-The warmup job sends one throwaway message (`claude -p "hi"`) at `ANCHOR_TIME`: the window opens before your day starts and every reset lands where `advise` planned it. The dream job runs four phases in one process, in order: consolidate (asks Claude to propose memory cleanup; pairs with Claude Code's native auto-dream when your account has it), briefing, proposals, backlog. Each phase is deadline-guarded and failure-isolated: one phase failing never blocks the next, and the stamp file records per-phase outcomes that `sogno status` reads back. Everything Claude touches overnight is either read-only (`--permission-mode plan`) or confined to a worktree branch.
+The warmup job sends one throwaway message (`claude -p "hi"`) at `ANCHOR_TIME`: the window opens before your day starts and every reset lands where `advise` planned it. The dream job runs four phases in one process, in order: consolidate (asks Claude to propose memory cleanup; pairs with Claude Code's native auto-dream when your account has it), briefing, proposals, backlog. Each phase is deadline-guarded and failure-isolated: one phase failing never blocks the next, and the stamp file records per-phase outcomes that `sogno status` reads back. Everything Claude touches overnight is either read-only (`--permission-mode plan`) or confined to a worktree branch. `sogno install` registers the two jobs with the native scheduler for your platform: launchd on macOS, systemd user timers on Linux, Task Scheduler on Windows.
 
 ## Requirements
 
-macOS, [Claude Code](https://code.claude.com) CLI on PATH, `gh` (only for the backlog phase). No other dependencies.
+macOS, Linux, or Windows via Git Bash; [Claude Code](https://code.claude.com) CLI on PATH; `gh` (only for the backlog phase). On Linux, `systemd --user` (falls back to printed crontab lines if unavailable) and optionally `notify-send` for desktop notifications. On Windows, Git Bash plus Task Scheduler. No other dependencies.
 
 ## Roadmap
 

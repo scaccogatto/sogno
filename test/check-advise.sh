@@ -89,6 +89,34 @@ else
 fi
 
 echo ""
+echo "Testing PROJECTS_PREFIX derivation (real derive_projects_prefix)..."
+SOGNO_OS=macos
+assert_eq "-Users-gatto-Developer-" "$(derive_projects_prefix "/Users/gatto/Developer")" \
+  "derive_projects_prefix POSIX path unchanged from before"
+SOGNO_OS=windows
+assert_eq "C--Users-x-dev-" "$(derive_projects_prefix 'C:\Users\x\dev')" \
+  "derive_projects_prefix windows path (no cygpath on this host)"
+SOGNO_OS=macos
+
+echo ""
+echo "Testing date helpers (real epoch_to_local_date, iso_utc_to_epoch, yesterday_date) under TZ=Europe/Rome..."
+date_str=$(TZ=Europe/Rome epoch_to_local_date 1756900000)
+assert_eq "2025-09-03" "$date_str" "epoch_to_local_date(1756900000) under TZ=Europe/Rome = 2025-09-03"
+epoch_back=$(TZ=Europe/Rome iso_utc_to_epoch "2025-09-03T11:46:40")
+assert_eq "1756900000" "$epoch_back" "iso_utc_to_epoch(2025-09-03T11:46:40) = 1756900000"
+
+# Compared as a range, not against now-86400s: those disagree on DST switch days.
+now_epoch=$(date +%s)
+yd=$(yesterday_date)
+if [ "$yd" \< "$(date +%F)" ] && [ "$yd" \> "$(epoch_to_local_date $((now_epoch - 172800)))" ]; then
+  PASS=$((PASS + 1))
+  echo "  PASS yesterday_date is the day before today"
+else
+  FAIL=$((FAIL + 1))
+  printf "  FAIL yesterday_date returned %s\n" "$yd"
+fi
+
+echo ""
 echo "Test summary:"
 printf "  Passed: %d\n" "$PASS"
 printf "  Failed: %d\n" "$FAIL"

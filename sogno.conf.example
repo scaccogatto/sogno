@@ -12,3 +12,8 @@ BACKLOG_LABEL="sogno"                    # GitHub issue label for backlog
 MODEL_MECHANICAL="haiku"                 # warmup + consolidate
 MODEL_SYNTHESIS=""                       # empty = default account; briefing/proposals/backlog
 DREAM_DIR="$HOME/.claude/dream"          # runtime output: briefings, logs, lock, stamp
+
+# Escape hatch: skip auto-detection of the Claude Code transcript prefix for
+# PROJECTS_ROOT. Set it if no transcript matches (Windows drive letters are
+# derived but unverified). Look at ~/.claude/projects/ for the real prefix.
+# PROJECTS_PREFIX="-Users-you-Developer-"
