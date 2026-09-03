@@ -1,0 +1,14 @@
+#!/bin/sh
+# sogno configuration (copy to sogno.conf and edit for your setup)
+
+ANCHOR_TIME="06:30"                      # warmup HH:MM locale
+DREAM_TIME="03:30"                       # orchestrator start time
+DREAM_DEADLINE="07:30"                   # hard stop: skip remaining phases
+BACKLOG_DEADLINE="05:30"                 # don't START backlog after this time
+PROJECTS_ROOT="$HOME/Developer"          # root of active project repos
+PROJECTS_EXCLUDE=""                      # optional blocklist (space-separated repo names)
+BACKLOG_ENABLED=1                        # enable phase 3 (backlog)
+BACKLOG_LABEL="sogno"                    # GitHub issue label for backlog
+MODEL_MECHANICAL="haiku"                 # warmup + consolidate
+MODEL_SYNTHESIS=""                       # empty = default account; briefing/proposals/backlog
+DREAM_DIR="$HOME/.claude/dream"          # runtime output: briefings, logs, lock, stamp

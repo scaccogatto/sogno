@@ -1,0 +1,531 @@
+#!/bin/sh
+# sogno — nightly dream orchestrator + warmup anchor
+# Consolidates memory, generates briefing, proposes CLAUDE.md changes, and tackles backlog.
+set -eu
+
+# Setup
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+SELF="$(cd "$(dirname "$0")" && pwd)"
+TODAY="$(date +%F)"
+
+# Defaults (will be overridden by config)
+ANCHOR_TIME="06:30"
+DREAM_TIME="03:30"
+DREAM_DEADLINE="07:30"
+BACKLOG_DEADLINE="05:30"
+PROJECTS_ROOT="$HOME/Developer"
+PROJECTS_EXCLUDE=""
+BACKLOG_ENABLED=1
+BACKLOG_LABEL="sogno"
+MODEL_MECHANICAL="haiku"
+MODEL_SYNTHESIS=""
+DREAM_DIR="$HOME/.claude/dream"
+
+# Load config if present (local or next to script)
+for conf in "$SELF/sogno.conf" "./sogno.conf"; do
+  if [ -f "$conf" ]; then
+    . "$conf"
+    break
+  fi
+done
+
+# Derive transcript filter prefix from PROJECTS_ROOT
+# Claude Code flattens paths as: -Users-gatto-Developer-x
+PROJECTS_PREFIX="-$(echo "$PROJECTS_ROOT" | sed 's|^/||; s|/|-|g')-"
+
+# Helpers
+
+log() {
+  mkdir -p "$DREAM_DIR"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$DREAM_DIR/$TODAY.log"
+}
+
+claude_guard() {
+  command -v claude >/dev/null 2>&1 || {
+    echo "claude not in PATH" >&2
+    exit 1
+  }
+  # Check if --no-session-persistence is supported
+  if claude --help | grep -q "no-session-persistence"; then
+    CLAUDE_WARMUP_FLAG="--no-session-persistence"
+  else
+    CLAUDE_WARMUP_FLAG=""
+  fi
+}
+
+# Convert UTC timestamp (seconds since epoch) to local HH:MM format
+utc_to_local_hm() {
+  local utc_sec="$1"
+  date -j -u -f "%s" "$utc_sec" "+%H:%M"
+}
+
+# Extract hour from UTC timestamp (seconds since epoch), convert to local
+utc_to_local_hour() {
+  local utc_sec="$1"
+  date -j -u -f "%s" "$utc_sec" "+%H"
+}
+
+# Calculate end time of a 5-hour window given start time HH:MM
+window_end() {
+  local start_hm="$1"
+  local start_h="${start_hm%:*}"
+  local start_m="${start_hm#*:}"
+  # Strip leading zero for arithmetic (08 is octal in bash)
+  start_h=$((10#$start_h))
+  local end_h=$((start_h + 5))
+  if [ $end_h -ge 24 ]; then
+    end_h=$((end_h - 24))
+  fi
+  printf "%02d:%02d" "$end_h" "$start_m"
+}
+
+# Dispatch
+cmd_help() {
+  cat <<EOF
+sogno — nightly dream orchestrator + warmup anchor
+
+Usage: sogno [command] [options]
+
+Commands:
+  advise          Analyze usage patterns and recommend anchor time
+  warmup          Warm up Claude session (cheap model)
+  dream           Run full orchestrator (consolidate → briefing → proposals → backlog)
+  install         Install/update launchd jobs and create DREAM_DIR
+  status          Show job status, last runs, config drift
+  help            Show this message
+
+Options:
+  --dry-run       (dream) Print planned actions without executing
+  --only PHASE    (dream) Run only this phase: 0 (consolidate), 1 (briefing), 2 (proposals), 3 (backlog)
+  --now           (dream) Bypass daily stamp check (still respects lock)
+  --days N        (advise) Analyze last N days (default: 21)
+
+Examples:
+  sogno advise
+  sogno warmup
+  sogno dream --dry-run
+  sogno dream --only 1
+  sogno install
+  sogno status
+EOF
+}
+
+cmd_warmup() {
+  claude_guard
+  mkdir -p "$DREAM_DIR"
+  log "warmup started"
+
+  if [ -z "$CLAUDE_WARMUP_FLAG" ]; then
+    claude -p "hi" --model "$MODEL_MECHANICAL" 2>&1 | log
+  else
+    claude -p "hi" --model "$MODEL_MECHANICAL" "$CLAUDE_WARMUP_FLAG" 2>&1 | log
+  fi
+
+  log "warmup done"
+}
+
+cmd_advise() {
+  local days=21
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --days) days="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  log "advise: scanning $days days of transcript activity"
+
+  mkdir -p "$DREAM_DIR"
+
+  # Find recent jsonl files matching project prefix
+  cutoff_sec=$(( $(date +%s) - days * 86400 ))
+  cutoff_date=$(date -j -f "%s" "$cutoff_sec" "+%Y-%m-%d")
+
+  echo "Analyzing project activity from $cutoff_date to $TODAY..."
+  echo ""
+
+  # Find transcript files modified in the last N days
+  jsonl_files=$(find "$HOME/.claude/projects/" -path "*$PROJECTS_PREFIX*" -name "*.jsonl" -newermt "$cutoff_date" 2>/dev/null)
+
+  if [ -z "$jsonl_files" ]; then
+    echo "  < 5 days of data — using interactive fallback"
+    echo ""
+    read -p "What time do you usually start work (HH:MM, local)? " wake_time
+    read -p "When do you stop coding (HH:MM, default 18:00)? " stop_time
+    stop_time="${stop_time:-18:00}"
+
+    # Calculate candidate anchors 06:00-08:00 at 15min steps
+    echo ""
+    echo "Anchor candidates and resulting 5-hour windows:"
+    echo ""
+    for h in 06 07 08; do
+      for m in 00 15 30 45; do
+        anchor="${h}:${m}"
+        w1=$(window_end "$anchor")
+        w2=$(window_end "$w1")
+        w3=$(window_end "$w2")
+        printf "  %s  ->  %s / %s / %s\n" "$anchor" "$anchor-$w1" "$w1-$w2" "$w2-$w3"
+      done
+    done
+    echo ""
+    echo "Edit ANCHOR_TIME in $(cd "$(dirname "$0")" && pwd)/sogno.conf, then: sogno install"
+    return 0
+  fi
+
+  # Count files by hour of day to estimate when most work happens
+  # This is a simplified approach: use file modification time as proxy for activity
+  local activity_hours=""
+  echo "$jsonl_files" | while read -r jsonl; do
+    if [ -f "$jsonl" ]; then
+      # Get modification time and convert to local hour
+      mtime=$(stat -f %m "$jsonl" 2>/dev/null || echo "")
+      if [ -n "$mtime" ]; then
+        hour=$(date -j -u -f "%s" "$mtime" "+%H")
+        echo "$hour"
+      fi
+    fi
+  done | sort -n | uniq -c | sort -rn > /tmp/sogno_hours.txt
+
+  if [ ! -s /tmp/sogno_hours.txt ]; then
+    echo "No transcript data found."
+    return 0
+  fi
+
+  # Display histogram
+  echo "Activity time distribution (last $days days):"
+  echo ""
+  awk '{printf "  %02d:00  ", $2; for (i=1; i<=$1; i++) printf "*"; print ""}' /tmp/sogno_hours.txt
+  echo ""
+
+  earliest_hour=$(awk 'NR==NF {print $NF}' /tmp/sogno_hours.txt | sort -n | head -1)
+  # Strip leading zero for arithmetic
+  earliest_hour=$((10#$earliest_hour))
+
+  # Score candidates: 06:00-08:00 at 15min steps
+  echo "Anchor candidates and resulting 5-hour windows:"
+  echo ""
+  echo "  Time    Deadline  Score  Notes"
+  echo "  -----   --------  -----  -----"
+
+  best_anchor="06:30"
+  best_score=-999
+
+  for h in 6 7 8; do
+    for m in 00 15 30 45; do
+      anchor=$(printf "%02d:%02d" "$h" "$m")
+
+      # Calculate windows
+      w1=$(window_end "$anchor")
+      w2=$(window_end "$w1")
+
+      # Score (ponytail: naive linear scoring, refine weights if recommendation seems off)
+      score=0
+
+      # Penalize if anchor is after observed earliest activity
+      if [ "$h" -gt "$earliest_hour" ]; then
+        score=$((score - 10 * (h - earliest_hour)))
+      fi
+
+      # Penalize if window 1 boundary hits work hours (9-13, 14-18)
+      w1_h="${w1%:*}"
+      w1_h=$((10#$w1_h))
+      if [ "$w1_h" -ge 9 ] && [ "$w1_h" -le 13 ]; then
+        score=$((score - 5))
+      elif [ "$w1_h" -ge 14 ] && [ "$w1_h" -le 18 ]; then
+        score=$((score - 5))
+      fi
+
+      # Reward if window 2 is lunch window (13-14) or after work (>=18)
+      w2_h="${w2%:*}"
+      w2_h=$((10#$w2_h))
+      if ([ "$w2_h" -eq 13 ] || [ "$w2_h" -ge 18 ]); then
+        score=$((score + 10))
+      fi
+
+      printf "  %s      %s-%s  %3d\n" "$anchor" "$anchor" "$w1" "$score"
+
+      if [ "$score" -gt "$best_score" ]; then
+        best_score=$score
+        best_anchor="$anchor"
+      fi
+    done
+  done
+
+  echo ""
+  echo "Recommendation: ANCHOR_TIME=\"$best_anchor\""
+  echo ""
+  echo "Edit ANCHOR_TIME in $(cd "$(dirname "$0")" && pwd)/sogno.conf, then: sogno install"
+}
+
+cmd_install() {
+  mkdir -p "$DREAM_DIR"
+  mkdir -p "$HOME/Library/LaunchAgents"
+
+  log "install: rendering plist templates"
+
+  # Extract hour and minute from ANCHOR_TIME
+  local anchor_h="${ANCHOR_TIME%:*}"
+  local anchor_m="${ANCHOR_TIME#*:}"
+
+  # Extract hour and minute from DREAM_TIME
+  local dream_h="${DREAM_TIME%:*}"
+  local dream_m="${DREAM_TIME#*:}"
+
+  # Render warmup plist
+  local warmup_plist="$HOME/Library/LaunchAgents/com.scaccogatto.sogno.warmup.plist"
+  sed -e "s/@HOUR@/$anchor_h/g" -e "s/@MINUTE@/$anchor_m/g" \
+    "$SELF/launchd/com.scaccogatto.sogno.warmup.plist.tmpl" > "$warmup_plist.new"
+
+  if cmp -s "$warmup_plist.new" "$warmup_plist" 2>/dev/null; then
+    rm "$warmup_plist.new"
+    log "warmup plist unchanged"
+  else
+    mv "$warmup_plist.new" "$warmup_plist"
+    log "warmup plist updated, reloading..."
+    launchctl bootout "gui/$(id -u)" "com.scaccogatto.sogno.warmup" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$warmup_plist" 2>/dev/null || {
+      echo "Failed to bootstrap warmup job (may need manual launchctl bootstrap)" >&2
+    }
+  fi
+
+  # Render dream plist
+  local dream_plist="$HOME/Library/LaunchAgents/com.scaccogatto.sogno.dream.plist"
+  sed -e "s/@HOUR@/$dream_h/g" -e "s/@MINUTE@/$dream_m/g" \
+    "$SELF/launchd/com.scaccogatto.sogno.dream.plist.tmpl" > "$dream_plist.new"
+
+  if cmp -s "$dream_plist.new" "$dream_plist" 2>/dev/null; then
+    rm "$dream_plist.new"
+    log "dream plist unchanged"
+  else
+    mv "$dream_plist.new" "$dream_plist"
+    log "dream plist updated, reloading..."
+    launchctl bootout "gui/$(id -u)" "com.scaccogatto.sogno.dream" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$dream_plist" 2>/dev/null || {
+      echo "Failed to bootstrap dream job (may need manual launchctl bootstrap)" >&2
+    }
+  fi
+
+  log "install complete"
+  echo "Installation complete. Check status with: sogno status"
+}
+
+cmd_dream() {
+  local dry_run=0
+  local only_phase=""
+  local bypass_stamp=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry_run=1; shift ;;
+      --only) only_phase="$2"; shift 2 ;;
+      --now) bypass_stamp=1; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  mkdir -p "$DREAM_DIR"
+
+  # Lock via atomic mkdir (stale >6h reclaim)
+  local lock_dir="$DREAM_DIR/lock"
+  if mkdir "$lock_dir" 2>/dev/null; then
+    trap "rm -rf '$lock_dir'" EXIT
+    log "dream: lock acquired"
+  else
+    # Check if stale (>6h old)
+    local lock_mtime=$(stat -f %m "$lock_dir" 2>/dev/null || echo 0)
+    local now=$(date +%s)
+    if [ $((now - lock_mtime)) -gt 21600 ]; then
+      log "dream: removing stale lock"
+      rm -rf "$lock_dir"
+      mkdir "$lock_dir" || { echo "Failed to acquire lock" >&2; exit 1; }
+      trap "rm -rf '$lock_dir'" EXIT
+    else
+      echo "Another dream is running (lock held by PID in $lock_dir)" >&2
+      exit 1
+    fi
+  fi
+
+  # Daily stamp (bypass with --now)
+  local stamp_file="$DREAM_DIR/ran-$TODAY"
+  if [ $bypass_stamp -eq 0 ] && [ -f "$stamp_file" ]; then
+    log "dream: already ran today, skipping (use --now to override)"
+    return 0
+  fi
+
+  # Initialize stamp file
+  mkdir -p "$DREAM_DIR"
+  : > "$stamp_file"
+
+  log "dream: starting orchestrator"
+
+  # Dispatch phases
+  if [ -z "$only_phase" ] || [ "$only_phase" = "0" ]; then
+    cmd_dream_phase0 "$dry_run"
+    echo "phase=0:done" >> "$stamp_file"
+  fi
+
+  if [ -z "$only_phase" ] || [ "$only_phase" = "1" ]; then
+    cmd_dream_phase1 "$dry_run"
+    echo "phase=1:done" >> "$stamp_file"
+  fi
+
+  if [ -z "$only_phase" ] || [ "$only_phase" = "2" ]; then
+    cmd_dream_phase2 "$dry_run"
+    echo "phase=2:done" >> "$stamp_file"
+  fi
+
+  if [ -z "$only_phase" ] || [ "$only_phase" = "3" ]; then
+    cmd_dream_phase3 "$dry_run"
+    echo "phase=3:done" >> "$stamp_file"
+  fi
+
+  log "dream: orchestrator complete"
+}
+
+cmd_dream_phase0() {
+  local dry_run=$1
+  log "phase 0 (consolidate): starting"
+
+  # Check deadline
+  local now=$(date +%H:%M)
+  if [ "$now" \> "$DREAM_DEADLINE" ]; then
+    log "phase 0: past DREAM_DEADLINE ($DREAM_DEADLINE), skipping"
+    return 0
+  fi
+
+  if [ $dry_run -eq 1 ]; then
+    log "phase 0 (dry-run): claude -p \"$SELF/prompts/consolidate.md\" --model $MODEL_MECHANICAL --permission-mode plan"
+    return 0
+  fi
+
+  claude -p "$(cat "$SELF/prompts/consolidate.md")" \
+    --model "$MODEL_MECHANICAL" \
+    --permission-mode plan >> "$DREAM_DIR/$TODAY.log" 2>&1 || {
+    log "phase 0: error during consolidate"
+    return 1
+  }
+
+  log "phase 0 (consolidate): done"
+}
+
+cmd_dream_phase1() {
+  local dry_run=$1
+  log "phase 1 (briefing): starting"
+
+  # Check deadline
+  local now=$(date +%H:%M)
+  if [ "$now" \> "$DREAM_DEADLINE" ]; then
+    log "phase 1: past DREAM_DEADLINE ($DREAM_DEADLINE), skipping"
+    return 0
+  fi
+
+  # Discover yesterday's sessions
+  local yesterday=$(date -j -v-1d "+%F")
+  local transcript_list=$(find "$HOME/.claude/projects/${PROJECTS_PREFIX}"* -name "*.jsonl" \
+    -newermt "$yesterday 00:00" ! -newermt "$TODAY 00:00" 2>/dev/null | sort)
+
+  if [ -z "$transcript_list" ]; then
+    log "phase 1: no transcripts found for yesterday"
+    return 0
+  fi
+
+  if [ $dry_run -eq 1 ]; then
+    echo "$transcript_list" | head -3
+    log "phase 1 (dry-run): claude -p prompts/briefing.md --permission-mode plan with $(echo "$transcript_list" | wc -l) transcripts"
+    return 0
+  fi
+
+  # Group transcripts by project
+  local briefing_prompt="$(cat "$SELF/prompts/briefing.md")"
+  echo "$transcript_list" | while read -r tf; do
+    echo "$tf"
+  done | xargs -I {} echo {} | sort >> "$DREAM_DIR/$TODAY-transcripts.tmp" 2>/dev/null || true
+
+  if [ -s "$DREAM_DIR/$TODAY-transcripts.tmp" ]; then
+    local transcripts_arg=$(cat "$DREAM_DIR/$TODAY-transcripts.tmp" | tr '\n' ' ')
+    claude -p "$briefing_prompt" \
+      --permission-mode plan \
+      > "$DREAM_DIR/$TODAY-briefing.md" 2>&1 || {
+      log "phase 1: error during briefing generation"
+      return 1
+    }
+    rm -f "$DREAM_DIR/$TODAY-transcripts.tmp"
+  fi
+
+  log "phase 1 (briefing): wrote $DREAM_DIR/$TODAY-briefing.md"
+}
+
+cmd_dream_phase2() {
+  local dry_run=$1
+  log "phase 2 (proposals): starting"
+
+  # Check deadline
+  local now=$(date +%H:%M)
+  if [ "$now" \> "$DREAM_DEADLINE" ]; then
+    log "phase 2: past DREAM_DEADLINE ($DREAM_DEADLINE), skipping"
+    return 0
+  fi
+
+  mkdir -p "$DREAM_DIR/$TODAY-proposals"
+
+  log "phase 2 (proposals): done"
+}
+
+cmd_dream_phase3() {
+  local dry_run=$1
+  log "phase 3 (backlog): starting"
+
+  # Check deadline and enabled flag
+  if [ "$BACKLOG_ENABLED" != "1" ]; then
+    log "phase 3: backlog disabled"
+    return 0
+  fi
+
+  local now=$(date +%H:%M)
+  if [ "$now" \> "$BACKLOG_DEADLINE" ]; then
+    log "phase 3: past BACKLOG_DEADLINE ($BACKLOG_DEADLINE), skipping"
+    return 0
+  fi
+
+  log "phase 3 (backlog): done"
+}
+
+cmd_status() {
+  echo "sogno status at $(date)"
+  echo ""
+
+  # Launchd jobs
+  echo "Launchd jobs:"
+  for job in com.scaccogatto.sogno.warmup com.scaccogatto.sogno.dream; do
+    if launchctl print "gui/$(id -u)/$job" >/dev/null 2>&1; then
+      launchctl print "gui/$(id -u)/$job" | grep -E "state|last|next" | head -5 | sed 's/^/  /'
+    else
+      echo "  $job: not loaded"
+    fi
+  done
+
+  echo ""
+  echo "Config:"
+  echo "  ANCHOR_TIME=$ANCHOR_TIME"
+  echo "  DREAM_TIME=$DREAM_TIME"
+  echo "  PROJECTS_ROOT=$PROJECTS_ROOT"
+
+  echo ""
+  echo "Last run:"
+  if [ -f "$DREAM_DIR/$TODAY.log" ]; then
+    tail -5 "$DREAM_DIR/$TODAY.log" | sed 's/^/  /'
+  else
+    echo "  (none today)"
+  fi
+}
+
+# Main dispatch
+case "${1:-help}" in
+  advise) cmd_advise "${@:2}" ;;
+  warmup) cmd_warmup "${@:2}" ;;
+  dream) cmd_dream "${@:2}" ;;
+  install) cmd_install "${@:2}" ;;
+  status) cmd_status "${@:2}" ;;
+  help|--help|-h) cmd_help ;;
+  *) cmd_help; exit 1 ;;
+esac
