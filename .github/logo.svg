@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 220" width="220" height="220">
+  <rect width="220" height="220" rx="44" fill="#0f1220"/>
+  <path d="M150 52a62 62 0 1 0 22 88 52 52 0 0 1-22-88z" fill="#ffd166"/>
+  <rect x="62" y="146" width="34" height="12" rx="2" fill="#7ee787">
+    <animate attributeName="opacity" values="1;0;1" dur="1.6s" repeatCount="indefinite"/>
+  </rect>
+  <circle cx="70" cy="66" r="3" fill="#8b949e"/>
+  <circle cx="92" cy="50" r="2" fill="#8b949e"/>
+  <circle cx="58" cy="94" r="2" fill="#8b949e"/>
+</svg>

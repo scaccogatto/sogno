@@ -25,6 +25,7 @@ DREAM_DIR="$HOME/.claude/dream"
 # Load config if present (local or next to script)
 for conf in "$SELF/sogno.conf" "./sogno.conf"; do
   if [ -f "$conf" ]; then
+    # shellcheck disable=SC1090
     . "$conf"
     break
   fi
@@ -289,15 +290,24 @@ cmd_advise() {
     echo ""
     echo "Anchor candidates and resulting 5-hour windows:"
     echo ""
+    local fb_score fb_best_anchor="" fb_best_score=-999
     for h in 06 07 08; do
       for m in 00 15 30 45; do
         anchor="${h}:${m}"
         w1=$(window_end "$anchor")
         w2=$(window_end "$w1")
         w3=$(window_end "$w2")
-        printf "  %s  ->  %s-%s / %s-%s / %s-%s\n" "$anchor" "$anchor" "$w1" "$w1" "$w2" "$w2" "$w3"
+        # wake_time plays the role of earliest observed message: anchors after it are useless
+        fb_score=$(score_anchor "$anchor" "$wake_time")
+        printf "  %s  ->  %s-%s / %s-%s / %s-%s  score %3d\n" "$anchor" "$anchor" "$w1" "$w1" "$w2" "$w2" "$w3" "$fb_score"
+        if [ "$fb_score" -gt "$fb_best_score" ]; then
+          fb_best_score=$fb_score
+          fb_best_anchor="$anchor"
+        fi
       done
     done
+    echo ""
+    echo "Recommendation (from your answers, stop time $stop_time): ANCHOR_TIME=\"$fb_best_anchor\""
     echo ""
     echo "Edit ANCHOR_TIME in $SELF/sogno.conf, then: ./sogno install"
     return 0

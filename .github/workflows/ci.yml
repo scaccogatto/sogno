@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: command -v shellcheck || brew install shellcheck
+
+      - name: Syntax check
+        run: bash -n sogno
+
+      - name: Shellcheck
+        run: shellcheck -S warning sogno test/check-advise.sh
+
+      - name: Test
+        run: sh test/check-advise.sh
