@@ -1,7 +1,13 @@
-#!/bin/sh
-# Test suite for sogno advise functionality
-# Covers: window boundary math, UTC→local conversion, scoring logic
+#!/bin/bash
+# Test suite for sogno — sources the REAL script (SOGNO_SOURCED=1) and tests
+# the real functions directly. No duplicated/reimplemented logic here.
 set -eu
+
+cd "$(dirname "$0")/.."
+
+SOGNO_SOURCED=1
+export SOGNO_SOURCED
+. ./sogno
 
 PASS=0
 FAIL=0
@@ -12,106 +18,75 @@ assert_eq() {
   local msg="${3:-}"
   if [ "$expected" = "$actual" ]; then
     PASS=$((PASS + 1))
-    printf "  ✓ %s\n" "$msg"
+    printf "  OK %s\n" "$msg"
   else
     FAIL=$((FAIL + 1))
-    printf "  ✗ %s\n" "$msg"
+    printf "  FAIL %s\n" "$msg"
     printf "    expected: %s\n" "$expected"
     printf "    actual:   %s\n" "$actual"
   fi
 }
 
-# Pure functions (extracted from sogno for testing)
-
-window_end() {
-  local start_hm="$1"
-  local start_h="${start_hm%:*}"
-  local start_m="${start_hm#*:}"
-  local end_h=$((start_h + 5))
-  if [ $end_h -ge 24 ]; then
-    end_h=$((end_h - 24))
-  fi
-  printf "%02d:%02d" "$end_h" "$start_m"
-}
-
-utc_to_local_hour() {
-  local utc_sec="$1"
-  date -j -u -f "%s" "$utc_sec" "+%H"
-}
-
-# Test suite
-
-echo "Testing window boundary calculations..."
-{
-  # 06:30 + 5h = 11:30
-  assert_eq "11:30" "$(window_end "06:30")" "window_end(06:30) = 11:30"
-
-  # 11:30 + 5h = 16:30
-  assert_eq "16:30" "$(window_end "11:30")" "window_end(11:30) = 16:30"
-
-  # 16:30 + 5h = 21:30
-  assert_eq "21:30" "$(window_end "16:30")" "window_end(16:30) = 21:30"
-
-  # 21:30 + 5h = 02:30 (next day, wrapped)
-  assert_eq "02:30" "$(window_end "21:30")" "window_end(21:30) = 02:30 (wrapped)"
-
-  # Test edge: 20:00 + 5h = 01:00
-  assert_eq "01:00" "$(window_end "20:00")" "window_end(20:00) = 01:00"
-}
+echo "Testing window boundary calculations (real window_end)..."
+assert_eq "11:30" "$(window_end "06:30")" "window_end(06:30) = 11:30"
+assert_eq "16:30" "$(window_end "11:30")" "window_end(11:30) = 16:30"
+assert_eq "21:30" "$(window_end "16:30")" "window_end(16:30) = 21:30"
+assert_eq "02:30" "$(window_end "21:30")" "window_end(21:30) = 02:30 (wrapped)"
+assert_eq "01:00" "$(window_end "20:00")" "window_end(20:00) = 01:00"
+assert_eq "13:30" "$(window_end "08:30")" "window_end(08:30) = 13:30 (octal trap: leading-zero hour)"
+assert_eq "14:00" "$(window_end "09:00")" "window_end(09:00) = 14:00 (octal trap: leading-zero hour)"
 
 echo ""
-echo "Testing UTC to local hour conversion..."
-{
-  # Test with a known timestamp: 2026-09-03 12:00:00 UTC = 1725360000 (approx)
-  # Exact calculation: date -j -f "%Y-%m-%d %H:%M:%S" -u "2026-09-03 12:00:00" "+%s"
-  # Then convert back: date -j -u -f "%s" <seconds> "+%H"
-
-  # Create a fixed UTC timestamp and verify round-trip
-  # Using epoch timestamp for 2026-09-03T08:00:00 UTC
-  test_utc=1725337200
-  hour=$(utc_to_local_hour "$test_utc")
-
-  # Verify it's a two-digit hour
-  if [ ${#hour} -eq 2 ] && [ "$hour" -ge 0 ] && [ "$hour" -lt 24 ]; then
-    PASS=$((PASS + 1))
-    printf "  ✓ UTC→local conversion returns valid hour: %s\n" "$hour"
-  else
-    FAIL=$((FAIL + 1))
-    printf "  ✗ UTC→local conversion returned invalid hour: %s\n" "$hour"
-  fi
-}
+echo "Testing UTC->local conversion (real utc_to_local_hm, pinned TZ=Europe/Rome)..."
+# date -j -f "%s" 1756900000 "+%H:%M" under TZ=Europe/Rome is deterministically 13:46
+# (date -j -u -f ... would wrongly print 11:46 -- that was the D1 bug).
+hm=$(TZ=Europe/Rome utc_to_local_hm 1756900000)
+assert_eq "13:46" "$hm" "utc_to_local_hm(1756900000) under TZ=Europe/Rome = 13:46"
+hour=$(TZ=Europe/Rome utc_to_local_hour 1756900000)
+assert_eq "13" "$hour" "utc_to_local_hour(1756900000) under TZ=Europe/Rome = 13"
 
 echo ""
-echo "Testing anchor scoring logic..."
-{
-  # Simulate scoring for a set of anchors given an observed earliest first-message hour
-  # (we'll test the logic without full simulation)
+echo "Testing flattened-path -> repo-name mapping (real flattened_to_repo)..."
+PROJECTS_PREFIX="-Users-gatto-Developer-scaccogatto-"
+assert_eq "growth-oss" "$(flattened_to_repo "-Users-gatto-Developer-scaccogatto-growth-oss")" \
+  "flattened_to_repo strips PROJECTS_PREFIX, keeps hyphenated repo name intact"
+assert_eq "sogno" "$(flattened_to_repo "-Users-gatto-Developer-scaccogatto-sogno")" \
+  "flattened_to_repo maps sogno"
+assert_eq "-some-other-tree" "$(flattened_to_repo "-some-other-tree")" \
+  "flattened_to_repo passes through dirs that don't match the prefix"
 
-  # Score should penalize if anchor is after earliest message
-  # Example: earliest message at 08:00, anchor at 06:30 should score well
-  # Example: earliest message at 08:00, anchor at 08:30 should score poorly
+echo ""
+echo "Testing anchor scoring (real score_anchor) with synthetic per-day first-message data..."
+# Synthetic data: earliest observed first message across days is 08:00.
+# Full candidate sweep (06:00-08:45 step 15, same as cmd_advise) should prefer
+# 08:00 itself: no lateness penalty, and all three window boundaries land on
+# lunch (13:00) / evening (18:00) / evening (23:00) for max +30.
+earliest_hm="08:00"
+best_anchor=""
+best_score=-999999
+for h in 06 07 08; do
+  for m in 00 15 30 45; do
+    anchor="${h}:${m}"
+    score=$(score_anchor "$anchor" "$earliest_hm")
+    if [ "$score" -gt "$best_score" ]; then
+      best_score=$score
+      best_anchor="$anchor"
+    fi
+  done
+done
+assert_eq "08:00" "$best_anchor" "best anchor for earliest=08:00 is 08:00 (score $best_score)"
+assert_eq "30" "$best_score" "best score for earliest=08:00 is 30 (lunch+evening+evening, no lateness penalty)"
 
-  # We'll verify the scoring rules make intuitive sense via assertions on the weights
-
-  # Rule 1: Penalize 10 * (anchor_hour - earliest_hour) if anchor > earliest
-  earliest=8
-  anchor_after=9
-  expected_penalty=-10  # 1 hour late = -10 points
-
-  if [ $((anchor_after - earliest)) -gt 0 ]; then
-    penalty=$((10 * (anchor_after - earliest)))
-    penalty=$((-penalty))
-    assert_eq "$expected_penalty" "$penalty" "scoring: anchor 1h after earliest → -10 points"
-  fi
-
-  # Rule 2: Penalize if window 1 boundary (11:30, 12:30, etc) hits work hours 9-13 or 14-18
-  # For 06:30 anchor: w1 = 11:30 (in 9-13, penalize -5)
-  # For 07:30 anchor: w1 = 12:30 (in 9-13, penalize -5)
-  # For 08:30 anchor: w1 = 13:30 (past 9-13, but not yet 14-18, OK)
-
+# A same-hour-but-later-minute anchor should score worse than one that isn't late at all.
+score_0630=$(score_anchor "06:30" "08:00")
+score_0830=$(score_anchor "08:30" "08:00")
+if [ "$score_0830" -gt "$score_0630" ]; then
   PASS=$((PASS + 1))
-  printf "  ✓ Scoring rules defined: anchor-lateness, work-hour overlap, lunch/evening reward\n"
-}
+  printf "  OK 08:30 (lunch/evening boundaries, 30min late) outscores 06:30 (double work-hour hit) for earliest=08:00\n"
+else
+  FAIL=$((FAIL + 1))
+  printf "  FAIL expected score(08:30)=%s > score(06:30)=%s\n" "$score_0830" "$score_0630"
+fi
 
 echo ""
 echo "Test summary:"

@@ -7,8 +7,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/sh</string>
-    <string>/Users/gatto/Developer/scaccogatto/sogno/sogno</string>
+    <string>@SELF@/sogno</string>
     <string>warmup</string>
   </array>
 
@@ -22,9 +21,9 @@
   <false/>
 
   <key>StandardOutPath</key>
-  <string>/Users/gatto/.claude/dream/warmup.log</string>
+  <string>@DREAMDIR@/warmup-launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/gatto/.claude/dream/warmup-err.log</string>
+  <string>@DREAMDIR@/warmup-launchd-err.log</string>
 
   <key>ProcessType</key>
   <string>Background</string>
