@@ -1,0 +1,103 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>sogno - social preview source</title>
+<!--
+  Source of truth for .github/og.png, the repository's social preview card.
+
+  The PNG is what renders on every share of the repo link, so it goes stale
+  silently: it names the platforms and the phases, and both have moved once
+  already. Keeping the card as markup means the next correction is a one-line
+  edit instead of a redesign.
+
+  Regenerate (produces the committed 2560x1280 at 2x for high-DPI):
+
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      --headless --hide-scrollbars --force-device-scale-factor=2 \
+      --window-size=1280,640 --screenshot=.github/og.png \
+      "file://$PWD/.github/og.html"
+
+  Deliberately not a make target: it is the only thing here that needs a browser
+  installed, and it runs about twice a year.
+
+  GitHub does not read this file. The social preview is an uploaded copy, so
+  after regenerating re-upload it under Settings > General > Social preview or
+  the card stays whatever was uploaded last.
+-->
+<style>
+ *{margin:0;padding:0;box-sizing:border-box}
+ body{width:1280px;height:640px;overflow:hidden;background:#0f1220;
+   font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+   color:#e6edf3;position:relative}
+ /* Moonlight: one warm bloom behind the panel, the only light source on the card. */
+ .glow{position:absolute;top:-300px;right:-160px;width:820px;height:720px;border-radius:50%;
+   background:radial-gradient(closest-side,rgba(255,209,102,.20),rgba(255,209,102,0))}
+ /* Flex column, not absolute offsets: text is set in whatever the rendering
+    machine resolves system-ui to, so line widths are not knowable in advance. */
+ .wrap{position:relative;height:100%;width:712px;padding:60px 0 52px 64px;
+   display:flex;flex-direction:column}
+ .mark{display:flex;align-items:center;gap:13px;font-size:29px;font-weight:800;letter-spacing:-.02em}
+ h1{margin-top:30px;font-size:62px;line-height:1.06;font-weight:800;letter-spacing:-.035em}
+ h1 em{font-style:normal;color:#ffd166}
+ .sub{margin-top:26px;font-size:24px;line-height:1.42;color:#8b949e;max-width:620px}
+ .sub b{color:#e6edf3;font-weight:600}
+ /* Wider than .wrap on purpose: the chips sit below the panel, where the full
+    card width is free, and one row reads as one claim. */
+ .chips{margin-top:30px;display:flex;gap:11px;width:1120px}
+ .chip{border:1px solid #262c3d;background:#161a26;border-radius:999px;
+   padding:9px 18px;font-size:18px;color:#c3ccd9;white-space:nowrap}
+ .chip.hot{border-color:#3d4a35;background:#161f19;color:#7ee787}
+ .url{margin-top:auto;padding-top:22px;font-size:21px;font-weight:700;color:#e6edf3}
+ /* The panel is real `sogno advise` output: the card shows the decision the tool
+    makes, not an illustration of one. Mono here is data, not costume. */
+ .panel{position:absolute;right:64px;top:172px;width:404px;
+   border:1px solid #262c3d;border-radius:14px;background:#12151f;
+   box-shadow:0 24px 60px -20px rgba(0,0,0,.75);overflow:hidden}
+ .bar{display:flex;align-items:center;gap:8px;padding:13px 16px;border-bottom:1px solid #1e2331}
+ .bar i{width:9px;height:9px;border-radius:50%;background:#2b3242;display:block}
+ .bar span{margin-left:6px;font-size:14px;color:#6e7681;letter-spacing:.01em}
+ .out{padding:16px 18px 18px;font-size:15px;line-height:1.75;
+   font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+   color:#8b949e;font-variant-numeric:tabular-nums}
+ .out .cmd{color:#e6edf3}
+ .out .cmd b{color:#7ee787;font-weight:400}
+ .out .obs{margin-bottom:10px;color:#6e7681;font-size:14px}
+ .out .pick{color:#e6edf3}
+ .out .pick b{color:#ffd166;font-weight:400}
+ .out .rec{margin-top:10px;color:#7ee787}
+</style></head><body>
+<div class="glow"></div>
+
+<div class="wrap">
+ <div class="mark">
+  <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
+   <path d="M18.4 3.1a10.4 10.4 0 1 0 3.7 14.8 8.7 8.7 0 0 1-3.7-14.8z" fill="#ffd166"/>
+  </svg>
+  sogno
+ </div>
+
+ <h1>Your coding agent<br><em>dreams</em> while you sleep.</h1>
+
+ <div class="sub">A nightly briefing, memory consolidation, doc patches and one
+  <b>draft PR</b>, ready before your first coffee. Plus a warmup that anchors
+  Claude's 5-hour window to the day you actually work.</div>
+
+ <div class="chips">
+  <span class="chip">macOS · Linux · Windows</span>
+  <span class="chip">launchd · systemd · Task Scheduler</span>
+  <span class="chip hot">bash, no dependencies</span>
+ </div>
+
+ <div class="url">github.com/scaccogatto/sogno</div>
+</div>
+
+<div class="panel">
+ <div class="bar"><i></i><i></i><i></i><span>sogno advise</span></div>
+ <div class="out">
+  <div class="cmd">$ <b>sogno advise</b></div>
+  <div class="obs">earliest 08:04 · median 09:12 · 18 days</div>
+  <div>06:00&nbsp;&nbsp;11:00 / 16:00 / 21:00&nbsp;&nbsp;&nbsp;-5</div>
+  <div>07:00&nbsp;&nbsp;12:00 / 17:00 / 22:00&nbsp;&nbsp;-10</div>
+  <div class="pick"><b>08:00&nbsp;&nbsp;13:00 / 18:00 / 23:00&nbsp;&nbsp;&nbsp;30</b></div>
+  <div class="rec">recommended: ANCHOR_TIME="08:00"</div>
+ </div>
+</div>
+</body></html>
