@@ -1,4 +1,6 @@
-# NOTE: installed sogno expects prompts/ and launchd/ next to the binary or run from a repo checkout; share/ layout support is a TODO
+# `make install` puts the script in $(PREFIX)/bin and its read-only data
+# (prompts, scheduler templates) in $(PREFIX)/share/sogno, which sogno finds
+# relative to itself. Config goes in ~/.config/sogno/sogno.conf.
 
 PREFIX ?= /usr/local
 
@@ -11,9 +13,11 @@ install:
 	install -m 0644 launchd/*.tmpl $(DESTDIR)$(PREFIX)/share/sogno/launchd/
 	install -m 0644 systemd/*.tmpl $(DESTDIR)$(PREFIX)/share/sogno/systemd/
 	install -m 0644 windows/*.tmpl $(DESTDIR)$(PREFIX)/share/sogno/windows/
+	install -m 0644 sogno.conf.example $(DESTDIR)$(PREFIX)/share/sogno/
 
 test:
 	bash -n sogno
-	bash test/check-advise.sh
+	bash test/check-helpers.sh
+	bash test/check-dream.sh
 
 .PHONY: install test
