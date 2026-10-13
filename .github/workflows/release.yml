@@ -4,14 +4,26 @@ on:
   push:
     tags: v*
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test
+        run: |
+          bash -n sogno
+          shellcheck -S warning sogno test/*.sh
+          bash test/check-helpers.sh
+          bash test/check-dream.sh
 
       # Ship a bundle that runs as-is: sogno resolves prompts/ and the scheduler
       # templates relative to itself, so they have to travel with it.
@@ -19,11 +31,19 @@ jobs:
         run: |
           name="sogno-${GITHUB_REF_NAME#v}"
           mkdir -p "dist/$name"
-          cp -R sogno prompts launchd systemd windows sogno.conf.example README.md LICENSE Makefile "dist/$name/"
+          cp -R sogno prompts launchd systemd windows sogno.conf.example README.md CHANGELOG.md LICENSE Makefile "dist/$name/"
           cd dist
           tar czf "$name.tar.gz" "$name"
           zip -qr "$name.zip" "$name"
           sha256sum "$name.tar.gz" "$name.zip" > SHA256SUMS
+
+      # Verify with: gh attestation verify sogno-<version>.tar.gz -R scaccogatto/sogno
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 
       - name: Create release
         run: |
