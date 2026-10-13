@@ -270,7 +270,9 @@ printf 'touch "%s"\n' "$S/cwd-conf-sourced" > "$S/cwd/sogno.conf"
 if [ -e "$S/cwd-conf-sourced" ]; then ko "sogno.conf in the current directory is not sourced"; else ok "sogno.conf in the current directory is not sourced"; fi
 
 if command -v make >/dev/null 2>&1; then
-  make -s -C "$REPO" install DESTDIR="$S/inst" PREFIX=/usr >/dev/null
+  # Git for Windows' make is a native binary: keep MSYS from rewriting
+  # PREFIX=/usr into a Windows path, install(1) resolves the MSYS paths.
+  (cd "$REPO" && MSYS2_ARG_CONV_EXCL='*' make -s install DESTDIR="$S/inst" PREFIX=/usr >/dev/null)
   mkdir -p "$XDG_CONFIG_HOME/sogno"
   cp "$S/sogno.conf" "$XDG_CONFIG_HOME/sogno/sogno.conf"
   if bash "$S/inst/usr/bin/sogno" dream --now --only consolidate > "$S/out" 2>&1; then rc=0; else rc=$?; fi

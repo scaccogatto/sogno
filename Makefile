@@ -3,17 +3,17 @@
 # relative to itself. Config goes in ~/.config/sogno/sogno.conf.
 
 PREFIX ?= /usr/local
+SHARE = $(DESTDIR)$(PREFIX)/share/sogno
 
 install:
-	install -d $(DESTDIR)$(PREFIX)/bin
-	install -m 0755 sogno $(DESTDIR)$(PREFIX)/bin/sogno
-	install -d $(DESTDIR)$(PREFIX)/share/sogno/prompts $(DESTDIR)$(PREFIX)/share/sogno/launchd \
-	           $(DESTDIR)$(PREFIX)/share/sogno/systemd $(DESTDIR)$(PREFIX)/share/sogno/windows
-	install -m 0644 prompts/*.md $(DESTDIR)$(PREFIX)/share/sogno/prompts/
-	install -m 0644 launchd/*.tmpl $(DESTDIR)$(PREFIX)/share/sogno/launchd/
-	install -m 0644 systemd/*.tmpl $(DESTDIR)$(PREFIX)/share/sogno/systemd/
-	install -m 0644 windows/*.tmpl $(DESTDIR)$(PREFIX)/share/sogno/windows/
-	install -m 0644 sogno.conf.example $(DESTDIR)$(PREFIX)/share/sogno/
+	install -d "$(DESTDIR)$(PREFIX)/bin"
+	install -m 0755 sogno "$(DESTDIR)$(PREFIX)/bin/sogno"
+	install -d "$(SHARE)/prompts" "$(SHARE)/launchd" "$(SHARE)/systemd" "$(SHARE)/windows"
+	install -m 0644 prompts/*.md "$(SHARE)/prompts/"
+	install -m 0644 launchd/*.tmpl "$(SHARE)/launchd/"
+	install -m 0644 systemd/*.tmpl "$(SHARE)/systemd/"
+	install -m 0644 windows/*.tmpl "$(SHARE)/windows/"
+	install -m 0644 sogno.conf.example "$(SHARE)/"
 
 test:
 	bash -n sogno
